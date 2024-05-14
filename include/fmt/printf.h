@@ -22,6 +22,7 @@ template <typename Char> class basic_printf_context {
  private:
   basic_appender<Char> out_;
   basic_format_args<basic_printf_context> args_;
+  locale_ref loc_;
 
   static_assert(std::is_same<Char, char>::value ||
                     std::is_same<Char, wchar_t>::value,
@@ -34,13 +35,14 @@ template <typename Char> class basic_printf_context {
   /// Constructs a `printf_context` object. References to the arguments are
   /// stored in the context object so make sure they have appropriate lifetimes.
   basic_printf_context(basic_appender<Char> out,
-                       basic_format_args<basic_printf_context> args)
-      : out_(out), args_(args) {}
+                       basic_format_args<basic_printf_context> args,
+                       locale_ref loc = {})
+      : out_(out), args_(args), loc_(loc) {}
 
   auto out() -> basic_appender<Char> { return out_; }
   void advance_to(basic_appender<Char>) {}
 
-  auto locale() -> locale_ref { return {}; }
+  auto locale() -> locale_ref { return loc_; }
 
   auto arg(int id) const -> basic_format_arg<basic_printf_context> {
     return args_.get(id);
@@ -222,9 +224,9 @@ class printf_width_handler {
 // Workaround for a bug with the XL compiler when initializing
 // printf_arg_formatter's base class.
 template <typename Char>
-auto make_arg_formatter(basic_appender<Char> iter, format_specs& s)
-    -> arg_formatter<Char> {
-  return {iter, s, locale_ref()};
+auto make_arg_formatter(basic_appender<Char> iter, format_specs& s,
+                        locale_ref loc) -> arg_formatter<Char> {
+  return {iter, s, loc};
 }
 
 // The `printf` argument formatter.
@@ -249,7 +251,7 @@ class printf_arg_formatter : public arg_formatter<Char> {
  public:
   printf_arg_formatter(basic_appender<Char> iter, format_specs& s,
                        context_type& ctx)
-      : base(make_arg_formatter(iter, s)), context_(ctx) {}
+      : base(make_arg_formatter(iter, s, ctx.locale())), context_(ctx) {}
 
   void operator()(monostate value) { write(value); }
 
@@ -404,10 +406,10 @@ inline auto parse_printf_presentation_type(char c, type t, bool& upper)
 
 template <typename Char, typename Context>
 void vprintf(buffer<Char>& buf, basic_string_view<Char> format,
-             basic_format_args<Context> args) {
+             basic_format_args<Context> args, locale_ref loc = {}) {
   using iterator = basic_appender<Char>;
   auto out = iterator(buf);
-  auto context = basic_printf_context<Char>(out, args);
+  auto context = basic_printf_context<Char>(out, args, loc);
   auto parse_ctx = parse_context<Char>(format);
 
   // Returns the argument with specified index or, if arg_index is -1, the next
@@ -440,6 +442,8 @@ void vprintf(buffer<Char>& buf, basic_string_view<Char> format,
 
     auto specs = format_specs();
     specs.set_align(align::right);
+    if (loc)
+      specs.set_localized(); // all arguments are localized if locale is passed
 
     // Parse argument index, flags and width.
     int arg_index = parse_header(it, end, specs, get_arg);
@@ -584,6 +588,14 @@ inline auto vsprintf(basic_string_view<Char> fmt,
   detail::vprintf(buf, fmt, args);
   return {buf.data(), buf.size()};
 }
+template <typename Char>
+inline auto vsprintf(locale_ref loc, basic_string_view<Char> fmt,
+                     typename vprintf_args<Char>::type args)
+    -> std::basic_string<Char> {
+  auto buf = basic_memory_buffer<Char>();
+  detail::vprintf(buf, fmt, args, loc);
+  return to_string(buf);
+}
 
 /**
  * Formats `args` according to specifications in `fmt` and returns the result
@@ -602,12 +614,27 @@ FMT_DEPRECATED auto sprintf(basic_string_view<wchar_t> fmt, const T&... args)
     -> std::wstring {
   return vsprintf(fmt, make_printf_args<wchar_t>(args...));
 }
+template <typename... T>
+inline auto sprintf(locale_ref loc, string_view fmt, const T&... args)
+    -> std::string {
+  return vsprintf(loc, fmt, make_printf_args(args...));
+}
 
 template <typename Char>
 auto vfprintf(std::FILE* f, basic_string_view<Char> fmt,
               typename vprintf_args<Char>::type args) -> int {
   auto buf = basic_memory_buffer<Char>();
   detail::vprintf(buf, fmt, args);
+  size_t size = buf.size();
+  return std::fwrite(buf.data(), sizeof(Char), size, f) < size
+             ? -1
+             : static_cast<int>(size);
+}
+template <typename Char>
+auto vfprintf(std::FILE* f, locale_ref loc, basic_string_view<Char> fmt,
+              typename vprintf_args<Char>::type args) -> int {
+  auto buf = basic_memory_buffer<Char>();
+  detail::vprintf(buf, fmt, args, loc);
   size_t size = buf.size();
   return std::fwrite(buf.data(), sizeof(Char), size, f) < size
              ? -1
@@ -630,6 +657,11 @@ template <typename... T>
 FMT_DEPRECATED auto fprintf(std::FILE* f, basic_string_view<wchar_t> fmt,
                             const T&... args) -> int {
   return vfprintf(f, fmt, make_printf_args<wchar_t>(args...));
+}
+template <typename... T>
+inline auto fprintf(std::FILE* f, locale_ref loc, string_view fmt,
+                    const T&... args) -> int {
+  return vfprintf(f, loc, fmt, make_printf_args(args...));
 }
 
 /**
